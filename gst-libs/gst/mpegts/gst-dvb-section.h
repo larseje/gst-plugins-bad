@@ -154,6 +154,7 @@ struct _GstMpegTsNITStream
 struct _GstMpegTsNIT
 {
   gboolean   actual_network;
+  guint16    network_id;
 
   GPtrArray  *descriptors;
 
