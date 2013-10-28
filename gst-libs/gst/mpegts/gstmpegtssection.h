@@ -102,6 +102,8 @@ typedef enum {
   
 } GstMpegTsSectionTableID;
 
+typedef void (*GstMpegTsPacketizeFunc) (GstMpegTsSection *section);
+
 /**
  * GstMpegTsSection:
  * @section_type: The type of section
@@ -154,6 +156,7 @@ struct _GstMpegTsSection
    * FIXME : Maybe make public later on when allowing creation of
    * sections to that people can create private short sections ? */
   gboolean      short_section;
+  GstMpegTsPacketizeFunc packetizer;
 };
 
 
@@ -360,5 +363,7 @@ GstMpegTsSection *gst_message_parse_mpegts_section (GstMessage *message);
 GstMpegTsSection *gst_mpegts_section_new (guint16 pid,
 					   guint8 * data,
 					   gsize data_size);
+
+guint8 *gst_mpegts_section_packetize (GstMpegTsSection * section, gsize * output_size);
 
 #endif				/* GST_MPEGTS_SECTION_H */
