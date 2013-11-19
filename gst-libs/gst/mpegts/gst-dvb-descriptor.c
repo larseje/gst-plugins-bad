@@ -450,3 +450,37 @@ gst_mpegts_descriptor_parse_dvb_subtitling_nb (const GstMpegTsDescriptor *
 
   return descriptor->length / 8;
 }
+
+/**
+ * gst_mpegts_descriptor_from_dvb_subtitling:
+ * @lang: (transfer none) a string containing the ISO639 language
+ * @type: subtitling type
+ * @composition: composition page id
+ * @ancillary: ancillary page id
+ */
+GstMpegTsDescriptor *
+gst_mpegts_descriptor_from_dvb_subtitling (const gchar * lang,
+    guint8 type, guint16 composition, guint16 ancillary)
+{
+  GstMpegTsDescriptor *descriptor;
+  guint8 *data;
+
+  g_return_val_if_fail (lang != NULL, NULL);
+
+  descriptor = _new_descriptor (GST_MTS_DESC_DVB_SUBTITLING, 8);
+
+  data = descriptor->data + 2;
+
+  memcpy (data, lang, 3);
+  data += 3;
+
+  *data++ = type;
+
+  GST_WRITE_UINT16_BE (data, composition);
+  data += 2;
+
+  GST_WRITE_UINT16_BE (data, ancillary);
+  data += 2;
+
+  return descriptor;
+}
