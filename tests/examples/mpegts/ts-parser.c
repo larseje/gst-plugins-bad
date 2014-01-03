@@ -106,6 +106,30 @@ descriptor_name (gint val)
 }
 
 static const gchar *
+table_id_name (gint val)
+{
+  GEnumValue *en;
+
+  en = g_enum_get_value (G_ENUM_CLASS (g_type_class_peek
+          (GST_TYPE_MPEG_TS_SECTION_TABLE_ID)), val);
+  if (en == NULL)
+    /* Else try with DVB enum types */
+    en = g_enum_get_value (G_ENUM_CLASS (g_type_class_peek
+            (GST_TYPE_MPEG_TS_SECTION_DVB_TABLE_ID)), val);
+  if (en == NULL)
+    /* Else try with ATSC enum types */
+    en = g_enum_get_value (G_ENUM_CLASS (g_type_class_peek
+            (GST_TYPE_MPEG_TS_SECTION_ATSC_TABLE_ID)), val);
+  if (en == NULL)
+    /* Else try with SCTE enum types */
+    en = g_enum_get_value (G_ENUM_CLASS (g_type_class_peek
+            (GST_TYPE_MPEG_TS_SECTION_SCTE_TABLE_ID)), val);
+  if (en == NULL)
+    return "UNKNOWN/PRIVATE";
+  return en->value_nick;
+}
+
+static const gchar *
 enum_name (GType instance_type, gint val)
 {
   GEnumValue *en;
@@ -236,6 +260,44 @@ dump_descriptors (GPtrArray * descriptors, guint spacing)
           g_free (language_code);
           g_free (event_name);
           g_free (text);
+        }
+      }
+        break;
+      case GST_MTS_DESC_DVB_SUBTITLING:
+      {
+        gchar lang[4];
+        guint8 type;
+        guint16 composition;
+        guint16 ancillary;
+        guint i;
+
+        for (i = 0;
+            gst_mpegts_descriptor_parse_dvb_subtitling_idx (desc, i, &lang,
+                &type, &composition, &ancillary); i++) {
+          g_printf ("%*s   Subtitling, language_code:%s\n", spacing, "", lang);
+          g_printf ("%*s      type                : %u\n", spacing, "", type);
+          g_printf ("%*s      composition page id : %u\n", spacing, "",
+              composition);
+          g_printf ("%*s      ancillary page id   : %u\n", spacing, "",
+              ancillary);
+        }
+      }
+        break;
+      case GST_MTS_DESC_DVB_TELETEXT:
+      {
+        GstMpegTsDVBTeletextType type;
+        gchar lang[4];
+        guint8 magazine, page_number;
+        guint i;
+
+        for (i = 0;
+            gst_mpegts_descriptor_parse_dvb_teletext_idx (desc, i, &lang, &type,
+                &magazine, &page_number); i++) {
+          g_printf ("%*s   Teletext, type:0x%02x (%s)\n", spacing, "", type,
+              enum_name (GST_TYPE_MPEG_TS_DVB_TELETEXT_TYPE, type));
+          g_printf ("%*s      language    : %s\n", spacing, "", lang);
+          g_printf ("%*s      magazine    : %u\n", spacing, "", magazine);
+          g_printf ("%*s      page number : %u\n", spacing, "", page_number);
         }
       }
         break;
@@ -471,12 +533,14 @@ _on_bus_message (GstBus * bus, GstMessage * message, GMainLoop * mainloop)
     {
       GstMpegTsSection *section;
       if ((section = gst_message_parse_mpegts_section (message))) {
+        const gchar *table_name;
+
+        table_name = table_id_name (section->table_id);
         g_print
             ("Got section: PID:0x%04x type:%s (table_id 0x%02x (%s)) at offset %"
             G_GUINT64_FORMAT "\n", section->pid,
             enum_name (GST_TYPE_MPEG_TS_SECTION_TYPE, section->section_type),
-            section->table_id, enum_name (GST_TYPE_MPEG_TS_SECTION_TABLE_ID,
-                section->table_id), section->offset);
+            section->table_id, table_name, section->offset);
         if (!section->short_section) {
           g_print
               ("   subtable_extension:0x%04x, version_number:0x%02x\n",
@@ -527,7 +591,11 @@ main (int argc, gchar ** argv)
   g_type_class_ref (GST_TYPE_MPEG_TS_MISC_DESCRIPTOR_TYPE);
   g_type_class_ref (GST_TYPE_MPEG_TS_ISO639_AUDIO_TYPE);
   g_type_class_ref (GST_TYPE_MPEG_TS_DVB_SERVICE_TYPE);
+  g_type_class_ref (GST_TYPE_MPEG_TS_DVB_TELETEXT_TYPE);
   g_type_class_ref (GST_TYPE_MPEG_TS_STREAM_TYPE);
+  g_type_class_ref (GST_TYPE_MPEG_TS_SECTION_DVB_TABLE_ID);
+  g_type_class_ref (GST_TYPE_MPEG_TS_SECTION_ATSC_TABLE_ID);
+  g_type_class_ref (GST_TYPE_MPEG_TS_SECTION_SCTE_TABLE_ID);
 
   mainloop = g_main_loop_new (NULL, FALSE);
 

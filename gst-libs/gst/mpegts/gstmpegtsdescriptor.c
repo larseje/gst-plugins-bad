@@ -75,7 +75,10 @@
 
 #define MAX_KNOWN_ICONV 25
 
-static GIConv __iconvs[MAX_KNOWN_ICONV];
+/* First column is the original encoding,
+ * second column is the target encoding */
+
+static GIConv __iconvs[MAX_KNOWN_ICONV][MAX_KNOWN_ICONV];
 
 /* All these conversions will be to UTF8 */
 typedef enum
@@ -96,12 +99,13 @@ typedef enum
   _ICONV_ISO8859_13,
   _ICONV_ISO8859_14,
   _ICONV_ISO8859_15,
-  _ICONV_ISO10646_UC2,
+  _ICONV_UCS_2BE,
   _ICONV_EUC_KR,
   _ICONV_GB2312,
   _ICONV_UTF_16BE,
   _ICONV_ISO10646_UTF8,
   _ICONV_ISO6937,
+  _ICONV_UTF8,
   /* Insert more here if needed */
   _ICONV_MAX
 } LocalIconvCode;
@@ -122,24 +126,27 @@ static const gchar *iconvtablename[] = {
   "iso-8859-13",
   "iso-8859-14",
   "iso-8859-15",
-  "ISO-10646/UCS2",
+  "UCS-2BE",
   "EUC-KR",
   "GB2312",
   "UTF-16BE",
   "ISO-10646/UTF8",
-  "iso6937"
+  "iso6937",
+  "utf-8"
       /* Insert more here if needed */
 };
 
 void
 __initialize_descriptors (void)
 {
-  guint i;
+  guint i, j;
 
   /* Initialize converters */
   /* FIXME : How/when should we close them ??? */
-  for (i = 0; i < MAX_KNOWN_ICONV; i++)
-    __iconvs[i] = ((GIConv) - 1);
+  for (i = 0; i < MAX_KNOWN_ICONV; i++) {
+    for (j = 0; j < MAX_KNOWN_ICONV; j++)
+      __iconvs[i][j] = ((GIConv) - 1);
+  }
 }
 
 /*
@@ -193,7 +200,7 @@ get_encoding (const gchar * text, guint * start_text, gboolean * is_multibyte)
       break;
     }
     case 0x11:
-      encoding = _ICONV_ISO10646_UC2;
+      encoding = _ICONV_UCS_2BE;
       *start_text = 1;
       *is_multibyte = TRUE;
       break;
@@ -241,6 +248,169 @@ beach:
       encoding, firstbyte, *start_text, *is_multibyte);
 
   return encoding;
+}
+
+static GIConv
+_get_iconv (LocalIconvCode from, LocalIconvCode to)
+{
+  if (__iconvs[from][to] == (GIConv) - 1)
+    __iconvs[from][to] = g_iconv_open (iconvtablename[to],
+        iconvtablename[from]);
+  return __iconvs[from][to];
+}
+
+static void
+_encode_control_codes (gchar * text, gsize length, gboolean is_multibyte)
+{
+  gsize pos = 0;
+
+  while (pos < length) {
+    if (is_multibyte) {
+      guint16 code = GST_READ_UINT16_BE (text + pos);
+      if (code == 0x000A) {
+        text[pos] = 0xE0;
+        text[pos + 1] = 0x8A;
+      }
+      pos += 2;
+    } else {
+      guint8 code = text[pos];
+      if (code == 0x0A)
+        text[pos] = 0x8A;
+      pos++;
+    }
+  }
+}
+
+/**
+ * dvb_text_from_utf8:
+ * @text: The text to convert. This should be in UTF-8 format
+ * @out_size: (out) the byte length of the new text
+ *
+ * Converts UTF-8 strings to text characters compliant with EN 300 468.
+ * The converted text can be used directly in DVB #GstMpegTsDescriptor
+ *
+ * The function will try different character maps until the string is
+ * completely converted.
+ *
+ * The function tries the default ISO 6937 character map first.
+ *
+ * If no character map that contains all characters could be found, the
+ * string is converted to ISO 6937 with unknown characters set to `?`.
+ *
+ * Returns: (transfer full) byte array of size @out_size
+ */
+guint8 *
+dvb_text_from_utf8 (const gchar * text, gsize * out_size)
+{
+  GError *error = NULL;
+  gchar *out_text;
+  guint8 *out_buffer;
+  guint encoding;
+  GIConv giconv = (GIConv) - 1;
+
+  /* We test character maps one-by-one. Start with the default */
+  encoding = _ICONV_ISO6937;
+  giconv = _get_iconv (_ICONV_UTF8, encoding);
+  out_text = g_convert_with_iconv (text, -1, giconv, NULL, out_size, &error);
+
+  if (out_text) {
+    GST_DEBUG ("Using default ISO6937 encoding");
+    goto out;
+  }
+
+  g_clear_error (&error);
+
+  for (encoding = _ICONV_ISO8859_1; encoding <= _ICONV_ISO10646_UTF8;
+      encoding++) {
+    giconv = _get_iconv (_ICONV_UTF8, encoding);
+    if (giconv == (GIConv) - 1)
+      continue;
+    out_text = g_convert_with_iconv (text, -1, giconv, NULL, out_size, &error);
+
+    if (out_text) {
+      GST_DEBUG ("Found suitable character map - %s", iconvtablename[encoding]);
+      goto out;
+    }
+
+    g_clear_error (&error);
+  }
+
+  out_text = g_convert_with_fallback (text, -1, iconvtablename[_ICONV_ISO6937],
+      iconvtablename[_ICONV_UTF8], "?", NULL, out_size, &error);
+
+out:
+
+  if (error) {
+    GST_WARNING ("Could not convert from utf-8: %s", error->message);
+    g_error_free (error);
+    if (out_text)
+      g_free (out_text);
+    return NULL;
+  }
+
+  switch (encoding) {
+    case _ICONV_ISO6937:
+      /* Default encoding contains no selection bytes. */
+      _encode_control_codes (out_text, *out_size, FALSE);
+      return (guint8 *) out_text;
+    case _ICONV_ISO8859_1:
+    case _ICONV_ISO8859_2:
+    case _ICONV_ISO8859_3:
+    case _ICONV_ISO8859_4:
+      /* These character sets requires 3 selection bytes */
+      _encode_control_codes (out_text, *out_size, FALSE);
+      out_buffer = g_malloc (*out_size + 3);
+      out_buffer[0] = 0x10;
+      out_buffer[1] = 0x00;
+      out_buffer[2] = encoding - _ICONV_ISO8859_1 + 1;
+      memcpy (out_buffer + 3, out_text, *out_size);
+      *out_size += 3;
+      g_free (out_text);
+      return out_buffer;
+    case _ICONV_ISO8859_5:
+    case _ICONV_ISO8859_6:
+    case _ICONV_ISO8859_7:
+    case _ICONV_ISO8859_8:
+    case _ICONV_ISO8859_9:
+    case _ICONV_ISO8859_10:
+    case _ICONV_ISO8859_11:
+    case _ICONV_ISO8859_12:
+    case _ICONV_ISO8859_13:
+    case _ICONV_ISO8859_14:
+    case _ICONV_ISO8859_15:
+      /* These character sets requires 1 selection byte */
+      _encode_control_codes (out_text, *out_size, FALSE);
+      out_buffer = g_malloc (*out_size + 1);
+      out_buffer[0] = encoding - _ICONV_ISO8859_5 + 1;
+      memcpy (out_buffer + 1, out_text, *out_size);
+      *out_size += 1;
+      g_free (out_text);
+      return out_buffer;
+    case _ICONV_UCS_2BE:
+    case _ICONV_EUC_KR:
+    case _ICONV_UTF_16BE:
+      /* These character sets requires 1 selection byte */
+      _encode_control_codes (out_text, *out_size, TRUE);
+      out_buffer = g_malloc (*out_size + 1);
+      out_buffer[0] = encoding - _ICONV_UCS_2BE + 0x11;
+      memcpy (out_buffer + 1, out_text, *out_size);
+      *out_size += 1;
+      g_free (out_text);
+      return out_buffer;
+    case _ICONV_GB2312:
+    case _ICONV_ISO10646_UTF8:
+      /* These character sets requires 1 selection byte */
+      _encode_control_codes (out_text, *out_size, FALSE);
+      out_buffer = g_malloc (*out_size + 1);
+      out_buffer[0] = encoding - _ICONV_UCS_2BE + 0x11;
+      memcpy (out_buffer + 1, out_text, *out_size);
+      *out_size += 1;
+      g_free (out_text);
+      return out_buffer;
+    default:
+      g_free (out_text);
+      return NULL;
+  }
 }
 
 /*
@@ -395,9 +565,7 @@ get_encoding_and_convert (const gchar * text, guint length)
 
   if (encoding > _ICONV_UNKNOWN && encoding < _ICONV_MAX) {
     GST_DEBUG ("Encoding %s", iconvtablename[encoding]);
-    if (__iconvs[encoding] == ((GIConv) - 1))
-      __iconvs[encoding] = g_iconv_open ("utf-8", iconvtablename[encoding]);
-    giconv = __iconvs[encoding];
+    giconv = _get_iconv (encoding, _ICONV_UTF8);
   } else {
     GST_FIXME ("Could not detect encoding. Returning NULL string");
     converted_str = NULL;
@@ -416,10 +584,7 @@ get_encoding_and_convert (const gchar * text, guint length)
     if (encoding >= _ICONV_ISO8859_2 && encoding <= _ICONV_ISO8859_15) {
       /* Sometimes using the standard 8859-1 set fixes issues */
       GST_DEBUG ("Encoding %s", iconvtablename[_ICONV_ISO8859_1]);
-      if (__iconvs[_ICONV_ISO8859_1] == (GIConv) - 1)
-        __iconvs[_ICONV_ISO8859_1] =
-            g_iconv_open ("utf-8", iconvtablename[_ICONV_ISO8859_1]);
-      giconv = __iconvs[_ICONV_ISO8859_1];
+      giconv = _get_iconv (_ICONV_ISO8859_1, _ICONV_UTF8);
 
       GST_INFO ("Trying encoding ISO 8859-1");
       converted_str = convert_to_utf8 (text, length, 1, giconv, FALSE, &error);
@@ -437,10 +602,7 @@ get_encoding_and_convert (const gchar * text, guint length)
        * provide the first byte that indicates ISO 8859-9 encoding.
        * If decoding from ISO 6937 failed, we try ISO 8859-9 here.
        */
-      if (__iconvs[_ICONV_ISO8859_9] == (GIConv) - 1)
-        __iconvs[_ICONV_ISO8859_9] =
-            g_iconv_open ("utf-8", iconvtablename[_ICONV_ISO8859_9]);
-      giconv = __iconvs[_ICONV_ISO8859_9];
+      giconv = _get_iconv (_ICONV_ISO8859_9, _ICONV_UTF8);
 
       GST_INFO ("Trying encoding ISO 8859-9");
       converted_str = convert_to_utf8 (text, length, 0, giconv, FALSE, &error);
@@ -465,6 +627,77 @@ failed:
   }
 }
 
+void
+_packetize_descriptor_array (GPtrArray * array, guint8 ** out_data)
+{
+  guint i;
+  guint8 header_size;
+  GstMpegTsDescriptor *descriptor;
+
+  g_return_if_fail (out_data != NULL);
+  g_return_if_fail (*out_data != NULL);
+
+  if (array == NULL)
+    return;
+
+  for (i = 0; i < array->len; i++) {
+    descriptor = g_ptr_array_index (array, i);
+
+    if (descriptor->tag == GST_MTS_DESC_DVB_EXTENSION)
+      header_size = 3;
+    else
+      header_size = 2;
+
+    memcpy (*out_data, descriptor->data, descriptor->length + header_size);
+    *out_data += descriptor->length + header_size;
+  }
+}
+
+GstMpegTsDescriptor *
+_new_descriptor (guint8 tag, guint8 length)
+{
+  GstMpegTsDescriptor *descriptor;
+  guint8 *data;
+
+  descriptor = g_slice_new (GstMpegTsDescriptor);
+
+  descriptor->tag = tag;
+  descriptor->tag_extension = 0;
+  descriptor->length = length;
+
+  descriptor->data = g_malloc (length + 2);
+
+  data = descriptor->data;
+
+  *data++ = descriptor->tag;
+  *data = descriptor->length;
+
+  return descriptor;
+}
+
+GstMpegTsDescriptor *
+_new_descriptor_with_extension (guint8 tag, guint8 tag_extension, guint8 length)
+{
+  GstMpegTsDescriptor *descriptor;
+  guint8 *data;
+
+  descriptor = g_slice_new (GstMpegTsDescriptor);
+
+  descriptor->tag = tag;
+  descriptor->tag_extension = tag_extension;
+  descriptor->length = length;
+
+  descriptor->data = g_malloc (length + 3);
+
+  data = descriptor->data;
+
+  *data++ = descriptor->tag;
+  *data++ = descriptor->tag_extension;
+  *data = descriptor->length;
+
+  return descriptor;
+}
+
 static GstMpegTsDescriptor *
 _copy_descriptor (GstMpegTsDescriptor * desc)
 {
@@ -476,7 +709,7 @@ _copy_descriptor (GstMpegTsDescriptor * desc)
   return copy;
 }
 
-static void
+void
 _free_descriptor (GstMpegTsDescriptor * desc)
 {
   g_free ((gpointer) desc->data);
@@ -597,6 +830,34 @@ gst_mpegts_find_descriptor (GPtrArray * descriptors, guint8 tag)
   return NULL;
 }
 
+/* GST_MTS_DESC_REGISTRATION (0x05) */
+/**
+ * gst_mpegts_descriptor_from_registration:
+ * @format_identifier: (transfer none) a 4 character format identifier string
+ * @additional_info: (transfer none) (allow-none) pointer to optional additional info
+ * @additional_info_length: length of the optional @additional_info
+ *
+ * Creates a %GST_MTS_DESC_REGISTRATION #GstMpegTsDescriptor
+ *
+ * Return: #GstMpegTsDescriptor, %NULL on failure
+ */
+GstMpegTsDescriptor *
+gst_mpegts_descriptor_from_registration (const gchar * format_identifier,
+    guint8 * additional_info, gsize additional_info_length)
+{
+  GstMpegTsDescriptor *descriptor;
+
+  g_return_val_if_fail (format_identifier != NULL, NULL);
+
+  descriptor = _new_descriptor (GST_MTS_DESC_REGISTRATION,
+      4 + additional_info_length);
+
+  memcpy (descriptor->data + 2, format_identifier, 4);
+  if (additional_info && (additional_info_length > 0))
+    memcpy (descriptor->data + 6, additional_info, additional_info_length);
+
+  return descriptor;
+}
 
 /* GST_MTS_DESC_ISO_639_LANGUAGE (0x0A) */
 /**
@@ -723,4 +984,28 @@ gst_mpegts_descriptor_parse_logical_channel (const GstMpegTsDescriptor *
   }
 
   return TRUE;
+}
+
+/**
+ * gst_mpegts_descriptor_from_custom:
+ * @tag: descriptor tag
+ * @data: (transfer none) descriptor data (after tag and length field)
+ * @length: length of @data
+ *
+ * Creates a #GstMpegTsDescriptor with custom @tag and @data
+ *
+ * Returns: #GstMpegTsDescriptor
+ */
+GstMpegTsDescriptor *
+gst_mpegts_descriptor_from_custom (guint8 tag, const guint8 * data,
+    gsize length)
+{
+  GstMpegTsDescriptor *descriptor;
+
+  descriptor = _new_descriptor (tag, length);
+
+  if (data && (length > 0))
+    memcpy (descriptor->data + 2, data, length);
+
+  return descriptor;
 }

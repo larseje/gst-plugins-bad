@@ -75,6 +75,40 @@ gst_mpegts_descriptor_parse_dvb_network_name (const GstMpegTsDescriptor *
   return TRUE;
 }
 
+/**
+ * gst_mpegts_descriptor_from_dvb_network_name:
+ * @name: the network name to set
+ *
+ * Fills a #GstMpegTsDescriptor to be a %GST_MTS_DESC_DVB_NETWORK_NAME,
+ * with the network name @name. The data field of the #GstMpegTsDescriptor
+ * will be allocated, and transferred to the caller.
+ *
+ * Returns: (transfer full) the #GstMpegTsDescriptor or %NULL on fail
+ */
+GstMpegTsDescriptor *
+gst_mpegts_descriptor_from_dvb_network_name (const gchar * name)
+{
+  GstMpegTsDescriptor *descriptor;
+  guint8 *converted_name;
+  gsize size;
+
+  g_return_val_if_fail (name != NULL, NULL);
+  g_return_val_if_fail (strlen (name) <= 256, NULL);
+
+  converted_name = dvb_text_from_utf8 (name, &size);
+
+  if (!converted_name) {
+    GST_WARNING ("Could not find proper encoding for string `%s`", name);
+    return NULL;
+  }
+
+  descriptor = _new_descriptor (GST_MTS_DESC_DVB_NETWORK_NAME, size);
+  memcpy (descriptor->data + 2, converted_name, size);
+  g_free (converted_name);
+
+  return descriptor;
+}
+
 /* GST_MTS_DESC_DVB_SATELLITE_DELIVERY_SYSTEM (0x43) */
 /**
  * gst_mpegts_descriptor_parse_satellite_delivery_system:
@@ -285,6 +319,71 @@ gst_mpegts_descriptor_parse_dvb_short_event (const GstMpegTsDescriptor *
   return TRUE;
 }
 
+/* GST_MTS_DESC_DVB_TELETEXT (0x56) */
+/**
+ * gst_mpegts_descriptor_parse_dvb_teletext_idx:
+ * @descriptor: a %GST_MTS_DESC_DVB_TELETEXT #GstMpegTsDescriptor
+ * @idx: The id of the teletext to get
+ * @language_code: (out) (allow-none) a 4-byte gchar array to hold language
+ * @teletext_type: (out) (allow-none) #GstMpegTsDVBTeletextType
+ * @magazine_number: (out) (allow-none)
+ * @page_number: (out) (allow-none)
+ *
+ * Parses teletext number @idx in the @descriptor. The language is in ISO639 format.
+ *
+ * Returns: FALSE on out-of-bounds and errors
+ */
+gboolean
+gst_mpegts_descriptor_parse_dvb_teletext_idx (const GstMpegTsDescriptor *
+    descriptor, guint idx, gchar (*language_code)[4],
+    GstMpegTsDVBTeletextType * teletext_type, guint8 * magazine_number,
+    guint8 * page_number)
+{
+  guint8 *data;
+
+  g_return_val_if_fail (descriptor != NULL && descriptor->data != NULL, FALSE);
+  g_return_val_if_fail (descriptor->tag == GST_MTS_DESC_DVB_TELETEXT, FALSE);
+
+  if (descriptor->length / 5 <= idx)
+    return FALSE;
+
+  data = (guint8 *) descriptor->data + 2 + idx * 5;
+
+  if (language_code) {
+    memcpy (language_code, data, 3);
+    (*language_code)[3] = 0;
+  }
+
+  if (teletext_type)
+    *teletext_type = data[3] >> 3;
+
+  if (magazine_number)
+    *magazine_number = data[3] & 0x07;
+
+  if (page_number)
+    *page_number = data[4];
+
+  return TRUE;
+}
+
+/**
+ * gst_mpegts_descriptor_parse_dvb_teletext_nb:
+ * @descriptor: a %GST_MTS_DESC_DVB_TELETEXT #GstMpegTsDescriptor
+ *
+ * Find the number of teletext entries in @descriptor
+ *
+ * Returns: Number of teletext entries
+ */
+guint
+gst_mpegts_descriptor_parse_dvb_teletext_nb (const GstMpegTsDescriptor *
+    descriptor)
+{
+  if (descriptor == NULL && descriptor->data == NULL)
+    return 0;
+
+  return descriptor->length / 5;
+}
+
 /* GST_MTS_DESC_DVB_SUBTITLING (0x59) */
 
 /**
@@ -350,4 +449,38 @@ gst_mpegts_descriptor_parse_dvb_subtitling_nb (const GstMpegTsDescriptor *
   g_return_val_if_fail (descriptor != NULL && descriptor->data != NULL, 0);
 
   return descriptor->length / 8;
+}
+
+/**
+ * gst_mpegts_descriptor_from_dvb_subtitling:
+ * @lang: (transfer none) a string containing the ISO639 language
+ * @type: subtitling type
+ * @composition: composition page id
+ * @ancillary: ancillary page id
+ */
+GstMpegTsDescriptor *
+gst_mpegts_descriptor_from_dvb_subtitling (const gchar * lang,
+    guint8 type, guint16 composition, guint16 ancillary)
+{
+  GstMpegTsDescriptor *descriptor;
+  guint8 *data;
+
+  g_return_val_if_fail (lang != NULL, NULL);
+
+  descriptor = _new_descriptor (GST_MTS_DESC_DVB_SUBTITLING, 8);
+
+  data = descriptor->data + 2;
+
+  memcpy (data, lang, 3);
+  data += 3;
+
+  *data++ = type;
+
+  GST_WRITE_UINT16_BE (data, composition);
+  data += 2;
+
+  GST_WRITE_UINT16_BE (data, ancillary);
+  data += 2;
+
+  return descriptor;
 }

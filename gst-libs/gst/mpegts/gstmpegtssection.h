@@ -102,6 +102,8 @@ typedef enum {
   
 } GstMpegTsSectionTableID;
 
+typedef void (*GstMpegTsPacketizeFunc) (GstMpegTsSection *section);
+
 /**
  * GstMpegTsSection:
  * @section_type: The type of section
@@ -154,6 +156,7 @@ struct _GstMpegTsSection
    * FIXME : Maybe make public later on when allowing creation of
    * sections to that people can create private short sections ? */
   gboolean      short_section;
+  GstMpegTsPacketizeFunc packetizer;
 };
 
 
@@ -176,6 +179,11 @@ struct _GstMpegTsPatProgram
 
 GPtrArray *gst_mpegts_section_get_pat (GstMpegTsSection *section);
 GType gst_mpegts_pat_program_get_type (void);
+
+GPtrArray *gst_mpegts_section_new_pat (void);
+GstMpegTsPatProgram *gst_mpegts_section_new_pat_program (void);
+GstMpegTsSection *gst_mpegts_section_from_pat (GPtrArray * programs,
+    guint16 ts_id);
 
 /* CAT */
 
@@ -333,6 +341,7 @@ struct _GstMpegTsPMTStream
 struct _GstMpegTsPMT
 {
   guint16    pcr_pid;
+  guint16    program_number;
 
   GPtrArray    *descriptors;
   GPtrArray *streams;
@@ -341,7 +350,10 @@ struct _GstMpegTsPMT
 GType gst_mpegts_pmt_get_type (void);
 GType gst_mpegts_pmt_stream_get_type (void);
 
+GstMpegTsPMT *gst_mpegts_section_new_pmt (void);
+GstMpegTsPMTStream *gst_mpegts_section_new_pmt_stream (void);
 const GstMpegTsPMT *gst_mpegts_section_get_pmt (GstMpegTsSection *section);
+GstMpegTsSection *gst_mpegts_section_from_pmt (GstMpegTsPMT *pmt, guint16 pid);
 
 /* TSDT */
 
@@ -354,11 +366,15 @@ GPtrArray *gst_mpegts_section_get_tsdt (GstMpegTsSection *section);
 #define gst_mpegts_section_unref(section) (gst_mini_object_unref (GST_MINI_OBJECT_CAST (section)))
 
 GstMessage *gst_message_new_mpegts_section (GstObject *parent, GstMpegTsSection *section);
+gboolean gst_mpegts_section_send_event (GstMpegTsSection * section, GstElement * element);
+GstMpegTsSection *gst_event_parse_mpegts_section (GstEvent * event);
 
 GstMpegTsSection *gst_message_parse_mpegts_section (GstMessage *message);
 
 GstMpegTsSection *gst_mpegts_section_new (guint16 pid,
 					   guint8 * data,
 					   gsize data_size);
+
+guint8 *gst_mpegts_section_packetize (GstMpegTsSection * section, gsize * output_size);
 
 #endif				/* GST_MPEGTS_SECTION_H */
