@@ -145,17 +145,17 @@ struct _GstMpegTsNITStream
 /**
  * GstMpegTsNIT:
  * @actual_network: Whether this NIT corresponds to the actual stream
+ * @network_id: ID of the network that this NIT describes
  * @descriptors: (element-type GstMpegTsDescriptor): the global descriptors
  * @streams: (element-type GstMpegTsNITStream): the streams
  *
  * Network Information Table (ISO/IEC 13818-1 / EN 300 468)
  *
- * The network_id is contained in the subtable_extension field of the
- * container #GstMpegTsSection.
  */
 struct _GstMpegTsNIT
 {
   gboolean   actual_network;
+  guint16    network_id;
 
   GPtrArray  *descriptors;
 
@@ -166,6 +166,11 @@ GType gst_mpegts_nit_get_type (void);
 GType gst_mpegts_nit_stream_get_type (void);
 
 const GstMpegTsNIT *gst_mpegts_section_get_nit (GstMpegTsSection *section);
+GstMpegTsSection *gst_mpegts_section_from_nit (GstMpegTsNIT *nit);
+
+GstMpegTsNIT *gst_mpegts_nit_new (void);
+GstMpegTsNITStream *gst_mpegts_nit_stream_new (void);
+
 
 /* BAT */
 

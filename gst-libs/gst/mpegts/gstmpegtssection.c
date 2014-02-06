@@ -257,20 +257,9 @@ gst_message_parse_mpegts_section (GstMessage * message)
   return section;
 }
 
-/**
- * gst_message_new_mpegts_section:
- * @parent: (transfer none): The creator of the message
- * @section: (transfer none): The #GstMpegTsSection to put in a message
- *
- * Creates a new #GstMessage for a @GstMpegTsSection.
- *
- * Returns: (transfer full): The new #GstMessage to be posted, or %NULL if the
- * section is not valid.
- */
-GstMessage *
-gst_message_new_mpegts_section (GstObject * parent, GstMpegTsSection * section)
+static GstStructure *
+_mpegts_section_get_structure (GstMpegTsSection * section)
 {
-  GstMessage *msg;
   GstStructure *st;
   GQuark quark;
 
@@ -303,7 +292,7 @@ gst_message_new_mpegts_section (GstObject * parent, GstMpegTsSection * section)
       quark = QUARK_TOT;
       break;
     default:
-      GST_DEBUG ("Creating message for unknown GstMpegTsSection");
+      GST_DEBUG ("Creating structure for unknown GstMpegTsSection");
       quark = QUARK_SECTION;
       break;
   }
@@ -311,9 +300,94 @@ gst_message_new_mpegts_section (GstObject * parent, GstMpegTsSection * section)
   st = gst_structure_new_id (quark, QUARK_SECTION, MPEG_TYPE_TS_SECTION,
       section, NULL);
 
+  return st;
+}
+
+/**
+ * gst_message_new_mpegts_section:
+ * @parent: (transfer none): The creator of the message
+ * @section: (transfer none): The #GstMpegTsSection to put in a message
+ *
+ * Creates a new #GstMessage for a @GstMpegTsSection.
+ *
+ * Returns: (transfer full): The new #GstMessage to be posted, or %NULL if the
+ * section is not valid.
+ */
+GstMessage *
+gst_message_new_mpegts_section (GstObject * parent, GstMpegTsSection * section)
+{
+  GstMessage *msg;
+  GstStructure *st;
+
+  st = _mpegts_section_get_structure (section);
+
   msg = gst_message_new_element (parent, st);
 
   return msg;
+}
+
+static GstEvent *
+_mpegts_section_get_event (GstMpegTsSection * section)
+{
+  GstStructure *structure;
+  GstEvent *event;
+
+  structure = _mpegts_section_get_structure (section);
+
+  event = gst_event_new_custom (GST_EVENT_CUSTOM_DOWNSTREAM, structure);
+
+  return event;
+}
+
+/**
+ * gst_event_parse_mpegts_section:
+ * @event: (transfer none): #GstEvent containing a #GstMpegTsSection
+ *
+ * Extracts the #GstMpegTsSection contained in the @event #GstEvent
+ *
+ * Returns: (transfer full): The extracted #GstMpegTsSection
+ */
+GstMpegTsSection *
+gst_event_parse_mpegts_section (GstEvent * event)
+{
+  const GstStructure *structure;
+  GstMpegTsSection *section;
+
+  structure = gst_event_get_structure (event);
+
+  if (!gst_structure_id_get (structure, QUARK_SECTION, MPEG_TYPE_TS_SECTION,
+          &section, NULL))
+    return NULL;
+
+  return section;
+}
+
+/**
+ * gst_mpegts_section_send_event:
+ * @element: (transfer none): The #GstElement to send to section event to
+ * @section: (transfer none): The #GstMpegTsSection to put in the event
+ *
+ * Creates a custom #GstEvent with a @GstMpegTsSection.
+ * The #GstEvent is sent to the @element #GstElement.
+ *
+ * Returns: %TRUE if the event is sent
+ */
+gboolean
+gst_mpegts_section_send_event (GstMpegTsSection * section, GstElement * element)
+{
+  GstEvent *event;
+
+  g_return_val_if_fail (section != NULL, FALSE);
+  g_return_val_if_fail (element != NULL, FALSE);
+
+  event = _mpegts_section_get_event (section);
+
+  if (!gst_element_send_event (element, event)) {
+    gst_event_unref (event);
+    return FALSE;
+  }
+
+  return TRUE;
 }
 
 static GstMpegTsPatProgram *
@@ -408,6 +482,109 @@ gst_mpegts_section_get_pat (GstMpegTsSection * section)
   return NULL;
 }
 
+/**
+ * gst_mpegts_pat_new:
+ *
+ * Allocates a new #GPtrArray for #GstMpegTsPatProgram
+ *
+ * Returns: (transfer full) (element-type GstMpegTsPatProgram): A newly allocated #GPtrArray
+ */
+GPtrArray *
+gst_mpegts_pat_new (void)
+{
+  GPtrArray *pat;
+
+  pat = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) _mpegts_pat_program_free);
+
+  return pat;
+}
+
+/**
+ * gst_mpegts_pat_program_new:
+ *
+ * Allocates a new #GstMpegTsPatProgram.
+ *
+ * Returns: (transfer full): A newly allocated #GstMpegTsPatProgram
+ */
+GstMpegTsPatProgram *
+gst_mpegts_pat_program_new (void)
+{
+  GstMpegTsPatProgram *program;
+
+  program = g_slice_new0 (GstMpegTsPatProgram);
+
+  return program;
+}
+
+static gboolean
+_packetize_pat (GstMpegTsSection * section)
+{
+  GPtrArray *programs;
+  guint8 *data;
+  gsize length;
+  guint i;
+
+  programs = gst_mpegts_section_get_pat (section);
+
+  if (programs == NULL)
+    return FALSE;
+
+  /* 8 byte common section fields
+     4 byte CRC */
+  length = 12;
+
+  /* 2 byte program number
+     2 byte program/network PID */
+  length += programs->len * 4;
+
+  _packetize_common_section (section, length);
+  data = section->data + 8;
+
+  for (i = 0; i < programs->len; i++) {
+    GstMpegTsPatProgram *program;
+
+    program = g_ptr_array_index (programs, i);
+
+    /* program_number       - 16 bit uimsbf */
+    GST_WRITE_UINT16_BE (data, program->program_number);
+    data += 2;
+
+    /* reserved             - 3  bit
+       program/network_PID  - 13 uimsbf */
+    GST_WRITE_UINT16_BE (data, program->network_or_program_map_PID | 0xE000);
+    data += 2;
+  }
+
+  g_ptr_array_unref (programs);
+
+  return TRUE;
+}
+
+/**
+ * gst_mpegts_section_from_pat:
+ * @programs: (transfer full) (element-type GstMpegTsPatProgram): an array of #GstMpegTsPatProgram
+ * @ts_id: Transport stream ID of the PAT
+ *
+ * Creates a PAT #GstMpegTsSection from the @programs array of #GstMpegTsPatPrograms
+ *
+ * Returns: (transfer full): a #GstMpegTsSection
+ */
+GstMpegTsSection *
+gst_mpegts_section_from_pat (GPtrArray * programs, guint16 ts_id)
+{
+  GstMpegTsSection *section;
+
+  section = _gst_mpegts_section_init (0x00,
+      GST_MTS_TABLE_ID_PROGRAM_ASSOCIATION);
+
+  section->subtable_extension = ts_id;
+  section->cached_parsed = (gpointer) programs;
+  section->packetizer = _packetize_pat;
+  section->destroy_parsed = (GDestroyNotify) g_ptr_array_unref;
+
+  return section;
+}
 
 /* Program Map Table */
 
@@ -473,7 +650,9 @@ _parse_pmt (GstMpegTsSection * section)
 
   GST_DEBUG ("Parsing %d Program Map Table", section->subtable_extension);
 
-  /* Skip already parsed data */
+  /* Assign program number from subtable extenstion,
+     and skip already parsed data */
+  pmt->program_number = section->subtable_extension;
   data += 8;
 
   pmt->pcr_pid = GST_READ_UINT16_BE (data) & 0x1FFF;
@@ -563,6 +742,167 @@ gst_mpegts_section_get_pmt (GstMpegTsSection * section)
   return (const GstMpegTsPMT *) section->cached_parsed;
 }
 
+/**
+ * gst_mpegts_pmt_new:
+ *
+ * Allocates and initializes a new #GstMpegTsPMT.
+ *
+ * Returns: (transfer full): #GstMpegTsPMT
+ */
+GstMpegTsPMT *
+gst_mpegts_pmt_new (void)
+{
+  GstMpegTsPMT *pmt;
+
+  pmt = g_slice_new0 (GstMpegTsPMT);
+
+  pmt->descriptors =
+      g_ptr_array_new_with_free_func ((GDestroyNotify) _free_descriptor);
+  pmt->streams = g_ptr_array_new_with_free_func ((GDestroyNotify)
+      _gst_mpegts_pmt_stream_free);
+
+  return pmt;
+}
+
+/**
+ * gst_mpegts_pmt_stream_new:
+ *
+ * Allocates and initializes a new #GstMpegTsPMTStream.
+ *
+ * Returns: (transfer full): #GstMpegTsPMTStream
+ */
+GstMpegTsPMTStream *
+gst_mpegts_pmt_stream_new (void)
+{
+  GstMpegTsPMTStream *stream;
+
+  stream = g_slice_new0 (GstMpegTsPMTStream);
+
+  stream->descriptors =
+      g_ptr_array_new_with_free_func ((GDestroyNotify) _free_descriptor);
+
+  return stream;
+}
+
+static gboolean
+_packetize_pmt (GstMpegTsSection * section)
+{
+  const GstMpegTsPMT *pmt;
+  GstMpegTsPMTStream *stream;
+  GstMpegTsDescriptor *descriptor;
+  gsize length, pgm_info_length, stream_length;
+  guint8 *data;
+  guint i, j;
+
+  pmt = gst_mpegts_section_get_pmt (section);
+
+  if (pmt == NULL)
+    return FALSE;
+
+  /* 8 byte common section fields
+     2 byte PCR pid
+     2 byte program info length
+     4 byte CRC */
+  length = 16;
+
+  /* Find length of program info */
+  pgm_info_length = 0;
+  if (pmt->descriptors) {
+    for (i = 0; i < pmt->descriptors->len; i++) {
+      descriptor = g_ptr_array_index (pmt->descriptors, i);
+      pgm_info_length += descriptor->length + 2;
+    }
+  }
+
+  /* Find length of PMT streams */
+  stream_length = 0;
+  if (pmt->streams) {
+    for (i = 0; i < pmt->streams->len; i++) {
+      stream = g_ptr_array_index (pmt->streams, i);
+
+      /* 1 byte stream type
+         2 byte PID
+         2 byte ES info length */
+      stream_length += 5;
+
+      if (stream->descriptors) {
+        for (j = 0; j < stream->descriptors->len; j++) {
+          descriptor = g_ptr_array_index (stream->descriptors, i);
+          stream_length += descriptor->length + 2;
+        }
+      }
+    }
+  }
+
+  length += pgm_info_length + stream_length;
+
+  _packetize_common_section (section, length);
+  data = section->data + 8;
+
+  /* reserved                         - 3  bit
+     PCR_PID                          - 13 uimsbf */
+  GST_WRITE_UINT16_BE (data, pmt->pcr_pid | 0xE000);
+  data += 2;
+
+  /* reserved                         - 4  bit
+     program_info_length              - 12 uimsbf */
+  GST_WRITE_UINT16_BE (data, pgm_info_length | 0xF000);
+  data += 2;
+
+  _packetize_descriptor_array (pmt->descriptors, &data);
+
+  if (pmt->streams) {
+    guint8 *pos;
+
+    for (i = 0; i < pmt->streams->len; i++) {
+      stream = g_ptr_array_index (pmt->streams, i);
+      /* stream_type                  - 8  bit uimsbf */
+      *data++ = stream->stream_type;
+
+      /* reserved                     - 3  bit
+         elementary_PID               - 13 bit uimsbf */
+      GST_WRITE_UINT16_BE (data, stream->pid | 0xE000);
+      data += 2;
+
+      /* reserved                     - 4  bit
+         ES_info_length               - 12 bit uimsbf */
+      pos = data;
+      data += 2;
+      _packetize_descriptor_array (stream->descriptors, &data);
+
+      /* Go back and update descriptor length */
+      GST_WRITE_UINT16_BE (pos, (data - pos - 2) | 0xF000);
+    }
+  }
+
+  return TRUE;
+}
+
+/**
+ * gst_mpegts_section_from_pmt:
+ * @pmt: (transfer full): a #GstMpegTsPMT to create a #GstMpegTsSection from
+ * @pid: The PID that the #GstMpegTsPMT belongs to
+ *
+ * Creates a #GstMpegTsSection from @pmt that is bound to @pid
+ *
+ * Returns: (transfer full): #GstMpegTsSection
+ */
+GstMpegTsSection *
+gst_mpegts_section_from_pmt (GstMpegTsPMT * pmt, guint16 pid)
+{
+  GstMpegTsSection *section;
+
+  g_return_val_if_fail (pmt != NULL, NULL);
+
+  section = _gst_mpegts_section_init (pid, GST_MTS_TABLE_ID_TS_PROGRAM_MAP);
+
+  section->subtable_extension = pmt->program_number;
+  section->cached_parsed = (gpointer) pmt;
+  section->packetizer = _packetize_pmt;
+  section->destroy_parsed = (GDestroyNotify) _gst_mpegts_pmt_free;
+
+  return section;
+}
 
 /* Conditional Access Table */
 static gpointer
@@ -715,6 +1055,62 @@ _identify_section (guint16 pid, guint8 table_id)
 
 }
 
+GstMpegTsSection *
+_gst_mpegts_section_init (guint16 pid, guint8 table_id)
+{
+  GstMpegTsSection *section;
+
+  section = g_slice_new0 (GstMpegTsSection);
+  gst_mini_object_init (GST_MINI_OBJECT_CAST (section), 0, MPEG_TYPE_TS_SECTION,
+      (GstMiniObjectCopyFunction) _gst_mpegts_section_copy, NULL,
+      (GstMiniObjectFreeFunction) _gst_mpegts_section_free);
+
+  section->pid = pid;
+  section->table_id = table_id;
+  section->current_next_indicator = TRUE;
+  section->section_type = _identify_section (pid, table_id);
+
+  return section;
+}
+
+void
+_packetize_common_section (GstMpegTsSection * section, gsize length)
+{
+  guint8 *data;
+
+  section->section_length = length;
+  data = section->data = g_malloc (length);
+
+  /* table_id                         - 8 bit uimsbf */
+  *data++ = section->table_id;
+
+  /* section_syntax_indicator         - 1  bit
+     reserved                         - 3  bit
+     section_length                   - 12 bit uimsbf */
+  GST_WRITE_UINT16_BE (data, (section->section_length - 3) | 0x7000);
+
+  if (!section->short_section)
+    *data |= 0x80;
+
+  data += 2;
+
+  /* subtable_extension               - 16 bit uimsbf */
+  GST_WRITE_UINT16_BE (data, section->subtable_extension);
+  data += 2;
+
+  /* reserved                         - 2  bit
+     version_number                   - 5  bit uimsbf
+     current_next_indicator           - 1  bit */
+  *data++ = 0xC0 |
+      ((section->version_number & 0x1F) << 1) |
+      (section->current_next_indicator & 0x01);
+
+  /* section_number                   - 8  bit uimsbf */
+  *data++ = section->section_number;
+  /* last_section_number              - 8  bit uimsbf */
+  *data++ = section->last_section_number;
+}
+
 /**
  * gst_mpegts_section_new:
  * @pid: the PID to which this section belongs
@@ -739,6 +1135,7 @@ gst_mpegts_section_new (guint16 pid, guint8 * data, gsize data_size)
 {
   GstMpegTsSection *res = NULL;
   guint8 tmp;
+  guint8 table_id;
   guint16 section_length;
 
   /* Check for length */
@@ -746,15 +1143,14 @@ gst_mpegts_section_new (guint16 pid, guint8 * data, gsize data_size)
   if (G_UNLIKELY (data_size < section_length + 3))
     goto short_packet;
 
-  res = g_slice_new0 (GstMpegTsSection);
-  gst_mini_object_init (GST_MINI_OBJECT_CAST (res), 0, MPEG_TYPE_TS_SECTION,
-      (GstMiniObjectCopyFunction) _gst_mpegts_section_copy, NULL,
-      (GstMiniObjectFreeFunction) _gst_mpegts_section_free);
+  /* Table id is in first byte */
+  table_id = *data;
 
-  res->pid = pid;
+  res = _gst_mpegts_section_init (pid, table_id);
+
   res->data = data;
-  /* table_id                        : 8  bit */
-  res->table_id = *data++;
+  /* table_id (already parsed)       : 8  bit */
+  data++;
   /* section_syntax_indicator        : 1  bit
    * other_fields (reserved)         : 3  bit*/
   res->short_section = (*data & 0x80) == 0x00;
@@ -780,8 +1176,6 @@ gst_mpegts_section_new (guint16 pid, guint8 * data, gsize data_size)
     res->last_section_number = *data;
   }
 
-  res->section_type = _identify_section (res->pid, res->table_id);
-
   return res;
 
 short_packet:
@@ -791,4 +1185,40 @@ short_packet:
         ", need:%d)", pid, data_size, section_length + 3);
     return NULL;
   }
+}
+
+/**
+ * gst_mpegts_section_packetize:
+ * @section: (transfer none): the #GstMpegTsSection that holds the data
+ * @output_size: (out): #gsize to hold the size of the data
+ *
+ * If the data in @section has aldready been packetized, the data pointer is returned
+ * immediately. Otherwise, the data field is allocated and populated.
+ *
+ * Returns: (transfer none): pointer to section data, or %NULL on fail
+ */
+guint8 *
+gst_mpegts_section_packetize (GstMpegTsSection * section, gsize * output_size)
+{
+  guint8 *crc;
+  g_return_val_if_fail (section != NULL, NULL);
+  g_return_val_if_fail (output_size != NULL, NULL);
+  g_return_val_if_fail (section->packetizer != NULL, NULL);
+
+  /* Section data has already been packetized */
+  if (section->data)
+    return section->data;
+
+  if (!section->packetizer (section))
+    return NULL;
+
+  if (!section->short_section) {
+    /* Update the CRC in the last 4 bytes of the section */
+    crc = section->data + section->section_length - 4;
+    GST_WRITE_UINT32_BE (crc, _calc_crc32 (section->data, crc - section->data));
+  }
+
+  *output_size = section->section_length;
+
+  return section->data;
 }
